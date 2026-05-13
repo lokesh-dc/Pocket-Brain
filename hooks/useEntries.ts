@@ -7,22 +7,55 @@ export function useEntries() {
   const [loading, setLoading] = useState(true);
 
   const fetchEntries = async () => {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('entries')
-      .select('*, category:categories(*)')
-      .order('timestamp', { ascending: false });
+    try {
+      setLoading(true);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-    if (error) {
-      console.error('Error fetching entries:', error);
-    } else {
-      setEntries(data || []);
+      const { data, error } = await supabase
+        .from('entries')
+        .select(`
+          *,
+          category:categories(*),
+          entities:entities(*)
+        `)
+        .eq('user_id', user.id)
+        .order('timestamp', { ascending: false });
+
+      if (error) {
+        console.error('Error fetching entries:', error);
+      } else {
+        setEntries(data || []);
+      }
+    } catch (err) {
+      console.error('Unexpected error:', err);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   useEffect(() => {
     fetchEntries();
+
+    // Set up realtime subscription
+    const subscription = supabase
+      .channel('entries_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'entries',
+        },
+        () => {
+          fetchEntries();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(subscription);
+    };
   }, []);
 
   return { entries, loading, refresh: fetchEntries };
