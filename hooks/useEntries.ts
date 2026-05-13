@@ -34,29 +34,28 @@ export function useEntries() {
     }
   };
 
+  const addEntry = (entry: Entry) => {
+    setEntries(prev => [entry, ...prev]);
+  };
+
+  const updateEntry = (id: string, updates: Partial<Entry>) => {
+    setEntries(prev => prev.map(e => e.id === id ? { ...e, ...updates } : e));
+  };
+
+  const removeEntry = (id: string) => {
+    setEntries(prev => prev.filter(e => e.id !== id));
+  };
+
   useEffect(() => {
     fetchEntries();
-
-    // Set up realtime subscription
-    const subscription = supabase
-      .channel('entries_changes')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'entries',
-        },
-        () => {
-          fetchEntries();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(subscription);
-    };
   }, []);
 
-  return { entries, loading, refresh: fetchEntries };
+  return { 
+    entries, 
+    loading, 
+    refresh: fetchEntries,
+    addEntry,
+    updateEntry,
+    removeEntry
+  };
 }

@@ -1,4 +1,4 @@
-import { ArrowUp, LayoutGrid } from "lucide-react-native";
+import { ArrowUp, LayoutGrid, Search, X } from "lucide-react-native";
 import React, { useState } from "react";
 import {
 	KeyboardAvoidingView,
@@ -13,21 +13,31 @@ import EntityChip from "./EntityChip";
 
 interface InputBarProps {
 	onSubmit: (text: string, category?: string) => void;
+	onSearch: (text: string) => void;
 	isLoading?: boolean;
 }
 
-export default function InputBar({ onSubmit, isLoading }: InputBarProps) {
+export default function InputBar({
+	onSubmit,
+	onSearch,
+	isLoading,
+}: InputBarProps) {
 	const [text, setText] = useState("");
 	const [isPopupVisible, setIsPopupVisible] = useState(false);
+	const [isSearchMode, setIsSearchMode] = useState(false);
 	const [selectedCategory, setSelectedCategory] = useState<Category | null>(
 		null,
 	);
 
-	const showEntityChip = text.toLowerCase().includes("spent");
+	const showEntityChip = !isSearchMode && text.toLowerCase().includes("spent");
 
 	const handleSubmit = () => {
 		if (text.trim()) {
-			onSubmit(text, selectedCategory?.name);
+			if (isSearchMode) {
+				onSearch(text);
+			} else {
+				onSubmit(text, selectedCategory?.name);
+			}
 			setText("");
 			setSelectedCategory(null);
 		}
@@ -48,16 +58,26 @@ export default function InputBar({ onSubmit, isLoading }: InputBarProps) {
 				<View style={styles.container}>
 					<TouchableOpacity
 						style={styles.iconButton}
-						onPress={() => setIsPopupVisible(true)}>
-						<LayoutGrid
-							size={22}
-							color={selectedCategory ? selectedCategory.color : "#64748b"}
-						/>
+						onPress={() =>
+							isSearchMode ? setIsSearchMode(false) : setIsPopupVisible(true)
+						}>
+						{isSearchMode ? (
+							<X size={22} color="#64748b" />
+						) : (
+							<LayoutGrid
+								size={22}
+								color={selectedCategory ? selectedCategory.color : "#64748b"}
+							/>
+						)}
 					</TouchableOpacity>
 
 					<TextInput
 						style={styles.input}
-						placeholder="What's on your mind?"
+						placeholder={
+							isSearchMode
+								? "Ask your mind anything..."
+								: "What's on your mind?"
+						}
 						placeholderTextColor="#94a3b8"
 						value={text}
 						onChangeText={setText}
@@ -66,15 +86,28 @@ export default function InputBar({ onSubmit, isLoading }: InputBarProps) {
 						maxHeight={100}
 					/>
 
+					{!isSearchMode && text.length === 0 && (
+						<TouchableOpacity
+							style={styles.iconButton}
+							onPress={() => setIsSearchMode(true)}>
+							<Search size={22} color="#64748b" />
+						</TouchableOpacity>
+					)}
+
 					<TouchableOpacity
 						style={[
 							styles.sendButton,
 							!text.trim() && styles.disabledButton,
 							isLoading && styles.loadingButton,
+							isSearchMode && styles.searchButton,
 						]}
 						onPress={handleSubmit}
 						disabled={!text.trim() || isLoading}>
-						<ArrowUp size={20} color={text.trim() ? "#fff" : "#94a3b8"} />
+						{isSearchMode ? (
+							<Search size={20} color="#fff" />
+						) : (
+							<ArrowUp size={20} color={text.trim() ? "#fff" : "#94a3b8"} />
+						)}
 					</TouchableOpacity>
 				</View>
 			</View>
@@ -125,6 +158,9 @@ const styles = StyleSheet.create({
 		alignItems: "center",
 		marginBottom: 4,
 		marginLeft: 8,
+	},
+	searchButton: {
+		backgroundColor: "#6366f1", // Indigo for search
 	},
 	disabledButton: {
 		backgroundColor: "#f1f5f9",
