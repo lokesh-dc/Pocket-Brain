@@ -1,5 +1,21 @@
 import { model } from './ai';
 
+export type Intent = 'log' | 'retrieve';
+
+export const detectIntent = (text: string): Intent => {
+  const queryWords = [
+    'what', 'how much', 'show me', 'give me', 'when did', 'how many',
+    'find', 'list', 'summarize', 'tell me', 'which', 'where did'
+  ];
+  const input = text.toLowerCase().trim();
+
+  const isQuery = queryWords.some(word =>
+    input.startsWith(word) || input.includes(word)
+  );
+
+  return isQuery ? 'retrieve' : 'log';
+};
+
 export interface ClassifiedResult {
   category: 'expense' | 'reading' | 'idea' | 'travel' | 'shopping' | 'health' | 'misc';
   entity: string | null;

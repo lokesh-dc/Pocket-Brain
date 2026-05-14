@@ -1,6 +1,6 @@
 import * as Haptics from "expo-haptics";
 import { Brain } from "lucide-react-native";
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import {
 	ActivityIndicator,
 	Alert,
@@ -16,16 +16,18 @@ import EntryPopup from "../../components/EntryPopup";
 import InputBar from "../../components/InputBar";
 import RetrievalResult from "../../components/RetrievalResult";
 import { useEntries } from "../../hooks/useEntries";
-import { classifyEntry } from "../../lib/classifier";
-import { generateEmbedding } from "../../lib/embeddings";
+import { detectIntent, classifyEntry } from "../../lib/classifier";
+import { generateEmbedding, searchEntries } from "../../lib/embeddings";
+import { retrieveEntries } from "../../lib/ai";
 import { supabase } from "../../lib/supabase";
 import { Entry } from "../../types";
 
 export default function IndexScreen() {
 	const [isLoading, setIsLoading] = useState(false);
 	const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null);
-	const [searchResults, setSearchResults] = useState<Entry[]>([]);
-	const [searchQuery, setSearchQuery] = useState("");
+  const [aiResponse, setAiResponse] = useState<{ answer: string; entry_ids: string[] } | null>(null);
+  const flatListRef = useRef<FlatList>(null);
+
 	const {
 		entries,
 		loading: entriesLoading,
@@ -35,12 +37,19 @@ export default function IndexScreen() {
 		removeEntry,
 	} = useEntries();
 
+  const handleInputSubmit = async (text: string, category?: string) => {
+    const intent = detectIntent(text);
+    if (intent === 'retrieve') {
+      await handleRetrieval(text);
+    } else {
+      await handleCapture(text, category);
+    }
+  };
+
 	const handleCapture = async (text: string, manualCategory?: string) => {
-		// Generate a temporary ID for the optimistic update
 		const tempId = `temp-${Date.now()}`;
 		const now = new Date().toISOString();
 
-		// 1. OPTIMISTIC UPDATE: Add the entry to the UI immediately
 		addEntry({
 			id: tempId,
 			user_id: "pending",
@@ -56,21 +65,14 @@ export default function IndexScreen() {
 			},
 		});
 
-		// We don't block the UI with "isLoading" anymore
-		// setIsLoading(true);
-
 		try {
-			const {
-				data: { user },
-			} = await supabase.auth.getUser();
+			const { data: { user } } = await supabase.auth.getUser();
 			if (!user) {
 				Alert.alert("Error", "You must be logged in to save entries.");
 				removeEntry(tempId);
 				return;
 			}
 
-			// Start classification in parallel with other background tasks
-			// (This is still "background" because we don't await the whole flow)
 			const processEntry = async () => {
 				try {
 					const [classified, embedding] = await Promise.all([
@@ -80,7 +82,6 @@ export default function IndexScreen() {
 
 					const categoryName = manualCategory || classified.category;
 
-					// Resolve category
 					let categoryData = null;
 					const { data: catData } = await supabase
 						.from("categories")
@@ -100,7 +101,6 @@ export default function IndexScreen() {
 						if (newCat) categoryData = newCat;
 					}
 
-					// Save the real entry
 					const { data: entry, error: entryError } = await supabase
 						.from("entries")
 						.insert({
@@ -117,7 +117,6 @@ export default function IndexScreen() {
 
 					if (entryError) throw entryError;
 
-					// Update the UI with real data
 					updateEntry(tempId, {
 						id: entry.id,
 						user_id: user.id,
@@ -127,7 +126,6 @@ export default function IndexScreen() {
 						currency: classified.currency,
 					});
 
-					// Handle entities in the background
 					if (classified.entity) {
 						const { data: existingEntity } = await supabase
 							.from("entities")
@@ -158,20 +156,16 @@ export default function IndexScreen() {
 								entry_id: entry.id,
 								entity_id: entityId,
 							});
-							// Refresh full entry to get joined entities if needed
-							// or just update locally
 						}
 					}
 
 					await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 				} catch (err) {
 					console.error("Background processing error:", err);
-					// Optional: revert optimistic update on hard failure
-					// removeEntry(tempId);
 				}
 			};
 
-			processEntry(); // Execute everything in the background
+			processEntry();
 		} catch (error: any) {
 			console.error("Error starting entry capture:", error);
 			Alert.alert("Error", error.message || "Failed to start capture");
@@ -179,40 +173,34 @@ export default function IndexScreen() {
 		}
 	};
 
-	const handleSearch = async (text: string) => {
-		setIsLoading(true);
-		setSearchQuery(text);
-		try {
-			const {
-				data: { user },
-			} = await supabase.auth.getUser();
-			if (!user) return;
+  const handleRetrieval = async (text: string) => {
+    setIsLoading(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-			const embedding = await generateEmbedding(text);
+      const results = await searchEntries(text, user.id);
+      const response = await retrieveEntries(text, results);
+      
+      setAiResponse(response);
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (error) {
+      console.error('Retrieval error:', error);
+      Alert.alert('Error', 'I could not retrieve your memories right now.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-			const { data, error } = await supabase.rpc("match_entries", {
-				query_embedding: embedding,
-				match_threshold: 0.5,
-				match_count: 5,
-				p_user_id: user.id,
-			});
-
-			if (error) throw error;
-
-			const entryIds = (data as any[]).map((r) => r.id);
-			const { data: fullEntries } = await supabase
-				.from("entries")
-				.select("*, category:categories(*), entities:entities(*)")
-				.in("id", entryIds);
-
-			setSearchResults(fullEntries || []);
-		} catch (error: any) {
-			console.error("Search error:", error);
-			Alert.alert("Search Error", error.message);
-		} finally {
-			setIsLoading(false);
-		}
-	};
+  const handleResponsePress = () => {
+    if (aiResponse?.entry_ids?.length) {
+      const firstId = aiResponse.entry_ids[0];
+      const index = entries.findIndex(e => e.id === firstId);
+      if (index !== -1) {
+        flatListRef.current?.scrollToIndex({ index, animated: true });
+      }
+    }
+  };
 
 	const renderEmptyState = () => (
 		<View style={styles.emptyContainer}>
@@ -229,6 +217,7 @@ export default function IndexScreen() {
 			<StatusBar barStyle="dark-content" />
 
 			<FlatList
+        ref={flatListRef}
 				data={entries}
 				keyExtractor={(item) => item.id}
 				renderItem={({ item }) => (
@@ -245,25 +234,23 @@ export default function IndexScreen() {
 				showsVerticalScrollIndicator={false}
 			/>
 
+      {aiResponse && (
+        <RetrievalResult
+          answer={aiResponse.answer}
+          entryCount={aiResponse.entry_ids.length}
+          onClose={() => setAiResponse(null)}
+          onPress={handleResponsePress}
+        />
+      )}
+
 			<InputBar
-				onSubmit={handleCapture}
-				onSearch={handleSearch}
+				onSubmit={handleInputSubmit}
 				isLoading={isLoading}
 			/>
 
 			<EntryPopup
 				entry={selectedEntry}
 				onClose={() => setSelectedEntry(null)}
-			/>
-
-			<RetrievalResult
-				results={searchResults}
-				query={searchQuery}
-				onClose={() => setSearchResults([])}
-				onEntryPress={(entry) => {
-					setSearchResults([]);
-					setSelectedEntry(entry);
-				}}
 			/>
 		</SafeAreaView>
 	);

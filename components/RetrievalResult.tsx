@@ -1,103 +1,91 @@
 import React from 'react';
-import { View, Text, StyleSheet, Modal, TouchableOpacity, ScrollView, Dimensions } from 'react-native';
-import { X, MessageCircleQuestion } from 'lucide-react-native';
-import EntryCard from './EntryCard';
-import { Entry } from '../types';
-
-const { height } = Dimensions.get('window');
+import { View, Text, StyleSheet, TouchableOpacity, Animated } from 'react-native';
+import { X, Sparkles } from 'lucide-react-native';
 
 interface RetrievalResultProps {
-  results: Entry[];
-  query: string;
+  answer: string;
+  entryCount: number;
   onClose: () => void;
-  onEntryPress: (entry: Entry) => void;
+  onPress: () => void;
 }
 
-export default function RetrievalResult({ results, query, onClose, onEntryPress }: RetrievalResultProps) {
-  return (
-    <Modal
-      visible={results.length > 0}
-      animationType="slide"
-      transparent
-    >
-      <View style={styles.overlay}>
-        <View style={styles.content}>
-          <View style={styles.header}>
-            <View style={styles.titleRow}>
-              <MessageCircleQuestion size={20} color="#6366f1" />
-              <Text style={styles.title}>Results for "{query}"</Text>
-            </View>
-            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-              <X size={24} color="#94a3b8" />
-            </TouchableOpacity>
-          </View>
+export default function RetrievalResult({ answer, entryCount, onClose, onPress }: RetrievalResultProps) {
+  if (!answer) return null;
 
-          <ScrollView contentContainerStyle={styles.scrollContent}>
-            {results.length === 0 ? (
-              <View style={styles.empty}>
-                <Text style={styles.emptyText}>No matches found for your query.</Text>
-              </View>
-            ) : (
-              results.map((item) => (
-                <View key={item.id}>
-                  <EntryCard 
-                    entry={item} 
-                    onPress={() => onEntryPress(item)} 
-                  />
-                </View>
-              ))
-            )}
-          </ScrollView>
+  return (
+    <View style={styles.container}>
+      <TouchableOpacity 
+        style={styles.card} 
+        onPress={onPress}
+        activeOpacity={0.9}
+      >
+        <View style={styles.header}>
+          <View style={styles.titleRow}>
+            <Sparkles size={16} color="#6366f1" />
+            <Text style={styles.title}>Memory Assistant</Text>
+          </View>
+          <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+            <X size={18} color="#94a3b8" />
+          </TouchableOpacity>
         </View>
-      </View>
-    </Modal>
+
+        <Text style={styles.answer}>{answer}</Text>
+        
+        <Text style={styles.footer}>
+          Based on {entryCount} {entryCount === 1 ? 'entry' : 'entries'}
+        </Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
+  container: {
+    paddingHorizontal: 16,
+    marginBottom: 12,
   },
-  content: {
-    backgroundColor: '#faf9f7',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    height: height * 0.85,
-    paddingTop: 20,
+  card: {
+    backgroundColor: '#f5f3ff', // Light purple
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#ddd6fe',
+    shadowColor: '#6366f1',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 4,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 24,
-    marginBottom: 20,
+    marginBottom: 8,
   },
   titleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
   },
   title: {
-    fontSize: 16,
+    fontSize: 12,
     fontWeight: '700',
-    color: '#0f172a',
-    marginLeft: 8,
+    color: '#6366f1',
+    marginLeft: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   closeButton: {
-    padding: 4,
+    padding: 2,
   },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingBottom: 40,
+  answer: {
+    fontSize: 15,
+    color: '#1e1b4b',
+    lineHeight: 22,
+    marginBottom: 8,
   },
-  empty: {
-    marginTop: 40,
-    alignItems: 'center',
-  },
-  emptyText: {
+  footer: {
+    fontSize: 11,
     color: '#94a3b8',
-    fontSize: 14,
+    fontStyle: 'italic',
   },
 });

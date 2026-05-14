@@ -13,13 +13,11 @@ import EntityChip from "./EntityChip";
 
 interface InputBarProps {
 	onSubmit: (text: string, category?: string) => void;
-	onSearch: (text: string) => void;
 	isLoading?: boolean;
 }
 
 export default function InputBar({
 	onSubmit,
-	onSearch,
 	isLoading,
 }: InputBarProps) {
 	const [text, setText] = useState("");
@@ -33,13 +31,10 @@ export default function InputBar({
 
 	const handleSubmit = () => {
 		if (text.trim()) {
-			if (isSearchMode) {
-				onSearch(text);
-			} else {
-				onSubmit(text, selectedCategory?.name);
-			}
+			onSubmit(text, selectedCategory?.name);
 			setText("");
 			setSelectedCategory(null);
+      setIsSearchMode(false);
 		}
 	};
 
