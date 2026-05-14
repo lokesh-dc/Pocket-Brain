@@ -1,6 +1,6 @@
 import * as Haptics from "expo-haptics";
 import { Brain } from "lucide-react-native";
-import React, { useState, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
 	ActivityIndicator,
 	Alert,
@@ -16,17 +16,41 @@ import EntryPopup from "../../components/EntryPopup";
 import InputBar from "../../components/InputBar";
 import RetrievalResult from "../../components/RetrievalResult";
 import { useEntries } from "../../hooks/useEntries";
-import { detectIntent, classifyEntry } from "../../lib/classifier";
-import { generateEmbedding, searchEntries } from "../../lib/embeddings";
 import { retrieveEntries } from "../../lib/ai";
+import { classifyEntry, detectIntent } from "../../lib/classifier";
+import { generateEmbedding, searchEntries } from "../../lib/embeddings";
 import { supabase } from "../../lib/supabase";
 import { Entry } from "../../types";
 
 export default function IndexScreen() {
 	const [isLoading, setIsLoading] = useState(false);
 	const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null);
-  const [aiResponse, setAiResponse] = useState<{ answer: string; entry_ids: string[] } | null>(null);
-  const flatListRef = useRef<FlatList>(null);
+	const [aiResponse, setAiResponse] = useState<{
+		answer: string;
+		entry_ids: string[];
+	} | null>(null);
+	const [profile, setProfile] = useState<{ full_name: string | null } | null>(
+		null,
+	);
+	const flatListRef = useRef<FlatList>(null);
+
+	useEffect(() => {
+		const fetchProfile = async () => {
+			const {
+				data: { user },
+			} = await supabase.auth.getUser();
+			if (!user) return;
+
+			const { data } = await supabase
+				.from("user_profiles")
+				.select("full_name")
+				.eq("id", user.id)
+				.single();
+
+			if (data) setProfile(data);
+		};
+		fetchProfile();
+	}, []);
 
 	const {
 		entries,
@@ -37,14 +61,14 @@ export default function IndexScreen() {
 		removeEntry,
 	} = useEntries();
 
-  const handleInputSubmit = async (text: string, category?: string) => {
-    const intent = detectIntent(text);
-    if (intent === 'retrieve') {
-      await handleRetrieval(text);
-    } else {
-      await handleCapture(text, category);
-    }
-  };
+	const handleInputSubmit = async (text: string, category?: string) => {
+		const intent = detectIntent(text);
+		if (intent === "retrieve") {
+			await handleRetrieval(text);
+		} else {
+			await handleCapture(text, category);
+		}
+	};
 
 	const handleCapture = async (text: string, manualCategory?: string) => {
 		const tempId = `temp-${Date.now()}`;
@@ -66,7 +90,9 @@ export default function IndexScreen() {
 		});
 
 		try {
-			const { data: { user } } = await supabase.auth.getUser();
+			const {
+				data: { user },
+			} = await supabase.auth.getUser();
 			if (!user) {
 				Alert.alert("Error", "You must be logged in to save entries.");
 				removeEntry(tempId);
@@ -173,34 +199,44 @@ export default function IndexScreen() {
 		}
 	};
 
-  const handleRetrieval = async (text: string) => {
-    setIsLoading(true);
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+	const handleRetrieval = async (text: string) => {
+		setIsLoading(true);
+		try {
+			const {
+				data: { user },
+			} = await supabase.auth.getUser();
+			if (!user) return;
 
-      const results = await searchEntries(text, user.id);
-      const response = await retrieveEntries(text, results);
-      
-      setAiResponse(response);
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch (error) {
-      console.error('Retrieval error:', error);
-      Alert.alert('Error', 'I could not retrieve your memories right now.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+			const results = await searchEntries(text, user.id);
+			const response = await retrieveEntries(text, results);
 
-  const handleResponsePress = () => {
-    if (aiResponse?.entry_ids?.length) {
-      const firstId = aiResponse.entry_ids[0];
-      const index = entries.findIndex(e => e.id === firstId);
-      if (index !== -1) {
-        flatListRef.current?.scrollToIndex({ index, animated: true });
-      }
-    }
-  };
+			setAiResponse(response);
+			await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+		} catch (error) {
+			console.error("Retrieval error:", error);
+			Alert.alert("Error", "I could not retrieve your memories right now.");
+		} finally {
+			setIsLoading(false);
+		}
+	};
+
+	const handleResponsePress = () => {
+		if (aiResponse?.entry_ids?.length) {
+			const firstId = aiResponse.entry_ids[0];
+			const index = entries.findIndex((e) => e.id === firstId);
+			if (index !== -1) {
+				flatListRef.current?.scrollToIndex({ index, animated: true });
+			}
+		}
+	};
+
+	const renderHeader = () => (
+		<View style={styles.header}>
+			<Text style={styles.welcomeText}>
+				Hello, {profile?.full_name?.split(" ")[0] || "there"}
+			</Text>
+		</View>
+	);
 
 	const renderEmptyState = () => (
 		<View style={styles.emptyContainer}>
@@ -217,36 +253,34 @@ export default function IndexScreen() {
 			<StatusBar barStyle="dark-content" />
 
 			<FlatList
-        ref={flatListRef}
+				ref={flatListRef}
 				data={entries}
 				keyExtractor={(item) => item.id}
 				renderItem={({ item }) => (
 					<EntryCard entry={item} onPress={() => setSelectedEntry(item)} />
 				)}
 				contentContainerStyle={styles.listContent}
+				ListHeaderComponent={renderHeader}
 				ListEmptyComponent={
 					entriesLoading ? (
 						<ActivityIndicator style={{ marginTop: 40 }} />
 					) : (
-						renderEmptyState
+						renderEmptyState()
 					)
 				}
 				showsVerticalScrollIndicator={false}
 			/>
 
-      {aiResponse && (
-        <RetrievalResult
-          answer={aiResponse.answer}
-          entryCount={aiResponse.entry_ids.length}
-          onClose={() => setAiResponse(null)}
-          onPress={handleResponsePress}
-        />
-      )}
+			{aiResponse && (
+				<RetrievalResult
+					answer={aiResponse.answer}
+					entryCount={aiResponse.entry_ids.length}
+					onClose={() => setAiResponse(null)}
+					onPress={handleResponsePress}
+				/>
+			)}
 
-			<InputBar
-				onSubmit={handleInputSubmit}
-				isLoading={isLoading}
-			/>
+			<InputBar onSubmit={handleInputSubmit} isLoading={isLoading} />
 
 			<EntryPopup
 				entry={selectedEntry}
@@ -263,8 +297,17 @@ const styles = StyleSheet.create({
 	},
 	listContent: {
 		padding: 20,
-		paddingTop: 40,
+		paddingTop: 10,
 		flexGrow: 1,
+	},
+	header: {
+		marginBottom: 24,
+		marginTop: 8,
+	},
+	welcomeText: {
+		fontFamily: "DMSerifDisplay-Regular",
+		fontSize: 28,
+		color: "#1a1a1a",
 	},
 	emptyContainer: {
 		flex: 1,

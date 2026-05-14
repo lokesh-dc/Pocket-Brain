@@ -72,3 +72,31 @@ create policy "Users can only access their own entry_entities" on entry_entities
 
 -- Default categories function (to be called on user signup or manually)
 -- This is a helper, not strictly requested but good for "is_default"
+
+-- User Profiles table
+create table user_profiles (
+  id uuid primary key references auth.users not null,
+  full_name text,
+  setup_complete boolean default false,
+  default_categories text[],
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+alter table user_profiles enable row level security;
+create policy "Users can only access their own profile" on user_profiles
+  for all using (auth.uid() = id);
+
+-- Function to handle new user profile creation
+create or function handle_new_user()
+returns trigger as $$
+begin
+  insert into public.user_profiles (id)
+  values (new.id);
+  return new;
+end;
+$$ language plpgsql security definer;
+
+-- Trigger for new user
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute procedure handle_new_user();
