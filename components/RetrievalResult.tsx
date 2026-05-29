@@ -42,7 +42,7 @@ export default function RetrievalResult({ answer, entryCount, onClose, onPress }
 const styles = StyleSheet.create({
   container: {
     paddingHorizontal: 16,
-    marginBottom: 12,
+    marginBottom: 80,
   },
   card: {
     backgroundColor: '#f5f3ff', // Light purple

@@ -1,40 +1,41 @@
 import * as Haptics from "expo-haptics";
+import { LinearGradient } from 'expo-linear-gradient';
 import { Brain } from "lucide-react-native";
-import React, { useEffect, useRef, useState } from "react";
+import React from "react";
 import {
 	ActivityIndicator,
 	Alert,
+	DeviceEventEmitter,
 	FlatList,
-	SafeAreaView,
 	StatusBar,
 	StyleSheet,
 	Text,
 	View,
 } from "react-native";
+import { SafeAreaView } from 'react-native-safe-area-context';
 import EntryCard from "../../components/EntryCard";
 import EntryPopup from "../../components/EntryPopup";
-import InputBar from "../../components/InputBar";
 import RetrievalResult from "../../components/RetrievalResult";
 import { useEntries } from "../../hooks/useEntries";
-import { retrieveEntries } from "../../lib/ai";
+import { getRetrievalAnswer } from "../../lib/ai";
 import { classifyEntry, detectIntent } from "../../lib/classifier";
 import { generateEmbedding, searchEntries } from "../../lib/embeddings";
 import { supabase } from "../../lib/supabase";
 import { Entry } from "../../types";
 
 export default function IndexScreen() {
-	const [isLoading, setIsLoading] = useState(false);
-	const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null);
-	const [aiResponse, setAiResponse] = useState<{
+	const [isLoading, setIsLoading] = React.useState(false);
+	const [selectedEntry, setSelectedEntry] = React.useState<Entry | null>(null);
+	const [aiResponse, setAiResponse] = React.useState<{
 		answer: string;
 		entry_ids: string[];
 	} | null>(null);
-	const [profile, setProfile] = useState<{ full_name: string | null } | null>(
+	const [profile, setProfile] = React.useState<{ full_name: string | null } | null>(
 		null,
 	);
-	const flatListRef = useRef<FlatList>(null);
+	const flatListRef = React.useRef<FlatList>(null);
 
-	useEffect(() => {
+	React.useEffect(() => {
 		const fetchProfile = async () => {
 			const {
 				data: { user },
@@ -50,6 +51,13 @@ export default function IndexScreen() {
 			if (data) setProfile(data);
 		};
 		fetchProfile();
+
+		// Listen for custom tab bar input
+		const sub = DeviceEventEmitter.addListener('input_submit', ({ text, mode }) => {
+			handleInputSubmit(text, mode === 'retrieve' ? 'retrieve' : undefined);
+		});
+
+		return () => sub.remove();
 	}, []);
 
 	const {
@@ -208,7 +216,7 @@ export default function IndexScreen() {
 			if (!user) return;
 
 			const results = await searchEntries(text, user.id);
-			const response = await retrieveEntries(text, results);
+			const response = await getRetrievalAnswer(text, results);
 
 			setAiResponse(response);
 			await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -280,7 +288,11 @@ export default function IndexScreen() {
 				/>
 			)}
 
-			<InputBar onSubmit={handleInputSubmit} isLoading={isLoading} />
+			<LinearGradient
+				colors={['rgba(250, 249, 247, 0)', 'rgba(250, 249, 247, 0.8)', '#faf9f7']}
+				style={styles.bottomMask}
+				pointerEvents="none"
+			/>
 
 			<EntryPopup
 				entry={selectedEntry}
@@ -325,5 +337,12 @@ const styles = StyleSheet.create({
 		fontSize: 14,
 		color: "#cbd5e1",
 		marginTop: 8,
+	},
+	bottomMask: {
+		position: 'absolute',
+		bottom: 0,
+		left: 0,
+		right: 0,
+		height: 120,
 	},
 });

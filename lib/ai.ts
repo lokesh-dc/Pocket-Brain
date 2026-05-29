@@ -1,36 +1,113 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+// lib/ai.ts
+// Uses Groq (llama-3.1-8b-instant) for retrieval — answers user queries from matched entries
 
-const genAI = new GoogleGenerativeAI(process.env.EXPO_PUBLIC_GEMINI_API_KEY!);
-export const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY;
+const GROQ_BASE_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = 'llama-3.1-8b-instant';
 
-export const retrieveEntries = async (query: string, entries: any[]) => {
-  const prompt = `
-System: You are a personal memory assistant. The user has a log of personal entries. Given their query and relevant entries, respond conversationally and concisely. Return ONLY valid JSON, no markdown:
-{
-  "answer": "conversational response, feel like a smart friend not a robot. For expenses always include total. For reading group by book. Keep it to 2-3 lines max.",
-  "entry_ids": ["id1", "id2"],
-  "type": "summary | list | single | aggregate"
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export interface RetrievalEntry {
+  id: string;
+  raw_text: string;
+  summary: string;
+  category: string;
+  amount: number | null;
+  currency: string | null;
+  timestamp: string;
 }
 
-Never make up entries not in the context.
-If no relevant entries found, say so naturally.
+export interface RetrievalResult {
+  answer: string;
+  entry_ids: string[];
+  type: 'summary' | 'list' | 'calculation' | 'empty';
+}
 
-Context entries: ${JSON.stringify(entries)}
-User query: ${query}
-  `.trim();
+// ─── Retrieval ────────────────────────────────────────────────────────────────
 
-  try {
-    const result = await model.generateContent(prompt);
-    const textResponse = result.response.text();
-    const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
-    const jsonText = jsonMatch ? jsonMatch[0] : textResponse;
-    return JSON.parse(jsonText);
-  } catch (error) {
-    console.error('Retrieval error:', error);
+const RETRIEVAL_SYSTEM_PROMPT = `You are a personal memory assistant inside an app called Mindrop. The user logs thoughts, expenses, books, ideas, and more. Your job is to answer their retrieval questions using only the entries provided.
+
+Always respond with a valid JSON object and nothing else — no markdown, no explanation, no backticks.
+
+JSON shape:
+{
+  "answer": string — a conversational, friendly response (like a smart friend, not a robot),
+  "entry_ids": string[] — IDs of entries you referenced in your answer,
+  "type": one of "summary" | "list" | "calculation" | "empty"
+}
+
+Rules:
+- "calculation" → when summing money, counts, or totals (e.g. "how much did I spend")
+- "list" → when listing specific entries (e.g. "what books did I read")
+- "summary" → when giving a broad overview (e.g. "what have I been up to this week")
+- "empty" → when no entries match the query at all
+- Be concise. Max 3 sentences for summary/calculation. Use a short bullet list for "list" type.
+- Reference amounts with their currency symbol when available.
+- If entries span multiple days, mention the date range naturally.
+- Never make up entries. Only use what's given.`;
+
+export async function getRetrievalAnswer(
+  query: string,
+  matchedEntries: RetrievalEntry[]
+): Promise<RetrievalResult> {
+  if (matchedEntries.length === 0) {
     return {
-      answer: "I couldn't process your request right now.",
+      answer: "I couldn't find anything matching that. Try logging some entries first!",
       entry_ids: [],
-      type: 'summary'
+      type: 'empty',
     };
   }
-};
+
+  // Format entries for the prompt — keep it concise
+  const entriesContext = matchedEntries
+    .map(e => {
+      const date = new Date(e.timestamp).toLocaleDateString('en-IN', {
+        day: 'numeric', month: 'short',
+      });
+      const amountStr = e.amount != null ? ` | ${e.currency ?? ''}${e.amount}` : '';
+      return `[${e.id}] (${date}) [${e.category}${amountStr}] ${e.summary || e.raw_text}`;
+    })
+    .join('\n');
+
+  const userMessage = `User query: "${query}"\n\nMatched entries:\n${entriesContext}`;
+  const response = await fetch(GROQ_BASE_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${GROQ_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      temperature: 0.3,
+      max_tokens: 512,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: RETRIEVAL_SYSTEM_PROMPT },
+        { role: 'user', content: userMessage },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Groq retrieval error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  const raw = data.choices?.[0]?.message?.content ?? '{}';
+
+  try {
+    const parsed = JSON.parse(raw) as RetrievalResult;
+    return {
+      answer: parsed.answer ?? 'Something went wrong parsing the response.',
+      entry_ids: Array.isArray(parsed.entry_ids) ? parsed.entry_ids : [],
+      type: parsed.type ?? 'summary',
+    };
+  } catch {
+    return {
+      answer: 'Had trouble reading the response. Please try again.',
+      entry_ids: [],
+      type: 'empty',
+    };
+  }
+}
