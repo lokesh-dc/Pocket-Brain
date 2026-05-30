@@ -21,7 +21,7 @@ create table entries (
   amount numeric,
   currency text,
   timestamp timestamp with time zone default timezone('utc'::text, now()) not null,
-  embedding vector(1536),
+  embedding vector(3072),
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 

@@ -17,9 +17,13 @@ export const generateEmbedding = async (text: string): Promise<number[] | null> 
 };
 
 export async function searchEntries(query: string, userId: string) {
+  console.log('[Search] Query:', query);
   try {
     const embedding = await generateEmbedding(query);
-    if (!embedding) return [];
+    if (!embedding) {
+      console.log('[Search] Embedding generation failed, returning empty');
+      return [];
+    }
 
     // 1. Semantic Search via RPC
     const { data: semanticResults, error: semanticError } = await supabase.rpc('match_documents', {
@@ -63,6 +67,7 @@ export async function searchEntries(query: string, userId: string) {
 
     // For now, we combine and deduplicate
     const results = semanticResults || [];
+    console.log('[Search] Results found:', results.length);
     return results;
   } catch (error) {
     console.error('Search entries error:', error);

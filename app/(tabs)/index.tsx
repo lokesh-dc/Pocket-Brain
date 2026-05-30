@@ -71,6 +71,7 @@ export default function IndexScreen() {
 
 	const handleInputSubmit = async (text: string, category?: string) => {
 		const intent = detectIntent(text);
+		console.log(`[Flow] Intent: ${intent} | Input: "${text}"`);
 		if (intent === "retrieve") {
 			await handleRetrieval(text);
 		} else {
@@ -79,6 +80,7 @@ export default function IndexScreen() {
 	};
 
 	const handleCapture = async (text: string, manualCategory?: string) => {
+		console.log('[Flow] Starting capture...');
 		const tempId = `temp-${Date.now()}`;
 		const now = new Date().toISOString();
 
@@ -109,93 +111,123 @@ export default function IndexScreen() {
 
 			const processEntry = async () => {
 				try {
-					const [classified, embedding] = await Promise.all([
-						classifyEntry(text),
-						generateEmbedding(text),
-					]);
+					console.log('[Flow] Classifying...');
+					const classifiedResults = await classifyEntry(text);
+					console.log('[Flow] Classified:', JSON.stringify(classifiedResults));
 
-					const categoryName = manualCategory || classified.category;
+					const savedEntries: string[] = [];
 
-					let categoryData = null;
-					const { data: catData } = await supabase
-						.from("categories")
-						.select("*")
-						.eq("user_id", user.id)
-						.ilike("name", categoryName)
-						.single();
+					for (const classified of classifiedResults) {
+						try {
+							const embedding = await generateEmbedding(classified.summary);
 
-					if (catData) {
-						categoryData = catData;
-					} else {
-						const { data: newCat } = await supabase
-							.from("categories")
-							.insert({ user_id: user.id, name: categoryName })
-							.select()
-							.single();
-						if (newCat) categoryData = newCat;
-					}
+							const categoryName = manualCategory || classified.category;
 
-					const { data: entry, error: entryError } = await supabase
-						.from("entries")
-						.insert({
-							user_id: user.id,
-							raw_text: text,
-							category_id: categoryData?.id,
-							summary: classified.summary,
-							amount: classified.amount,
-							currency: classified.currency,
-							embedding: embedding,
-						})
-						.select()
-						.single();
+							let categoryData = null;
+							const { data: catData } = await supabase
+								.from("categories")
+								.select("*")
+								.eq("user_id", user.id)
+								.ilike("name", categoryName)
+								.single();
 
-					if (entryError) throw entryError;
+							if (catData) {
+								categoryData = catData;
+							} else {
+								const { data: newCat } = await supabase
+									.from("categories")
+									.insert({ user_id: user.id, name: categoryName })
+									.select()
+									.single();
+								if (newCat) categoryData = newCat;
+							}
 
-					updateEntry(tempId, {
-						id: entry.id,
-						user_id: user.id,
-						summary: classified.summary,
-						category: categoryData || undefined,
-						amount: classified.amount,
-						currency: classified.currency,
-					});
-
-					if (classified.entity) {
-						const { data: existingEntity } = await supabase
-							.from("entities")
-							.select("id")
-							.eq("user_id", user.id)
-							.eq("name", classified.entity)
-							.eq("type", classified.entity_type || "project")
-							.single();
-
-						let entityId;
-						if (existingEntity) {
-							entityId = existingEntity.id;
-						} else {
-							const { data: newEntity } = await supabase
-								.from("entities")
+							const { data: entry, error: entryError } = await supabase
+								.from("entries")
 								.insert({
 									user_id: user.id,
-									name: classified.entity,
-									type: classified.entity_type || "project",
+									raw_text: text,
+									category_id: categoryData?.id,
+									summary: classified.summary,
+									amount: classified.amount,
+									currency: classified.currency,
+									embedding: embedding,
 								})
 								.select()
 								.single();
-							if (newEntity) entityId = newEntity.id;
-						}
 
-						if (entityId && entry) {
-							await supabase.from("entry_entities").insert({
-								entry_id: entry.id,
-								entity_id: entityId,
-							});
+							if (entryError) throw entryError;
+
+							// Only update temp entry for the first saved item
+							if (savedEntries.length === 0) {
+								updateEntry(tempId, {
+									id: entry.id,
+									user_id: user.id,
+									summary: classified.summary,
+									category: categoryData || undefined,
+									amount: classified.amount,
+									currency: classified.currency,
+								});
+							} else {
+								// Subsequent entries: add new entry to local state
+								addEntry({
+									id: entry.id,
+									user_id: user.id,
+									raw_text: text,
+									summary: classified.summary,
+									timestamp: new Date().toISOString(),
+									category: categoryData || undefined,
+									amount: classified.amount,
+									currency: classified.currency,
+								});
+							}
+
+							if (classified.entity) {
+								console.log('[Flow] Linking entity:', classified.entity);
+								const { data: existingEntity } = await supabase
+									.from("entities")
+									.select("id")
+									.eq("user_id", user.id)
+									.eq("name", classified.entity)
+									.eq("type", classified.entity_type || "project")
+									.single();
+
+								let entityId;
+								if (existingEntity) {
+									entityId = existingEntity.id;
+								} else {
+									const { data: newEntity } = await supabase
+										.from("entities")
+										.insert({
+											user_id: user.id,
+											name: classified.entity,
+											type: classified.entity_type || "project",
+										})
+										.select()
+										.single();
+									if (newEntity) entityId = newEntity.id;
+								}
+
+								if (entityId && entry) {
+									await supabase.from("entry_entities").insert({
+										entry_id: entry.id,
+										entity_id: entityId,
+									});
+								}
+							}
+
+							savedEntries.push(entry.id);
+							console.log(`[Flow] Entry saved (${savedEntries.length}/${classifiedResults.length}):`, entry.id, classified.summary);
+						} catch (err) {
+							console.error(`[Flow] Failed to save "${classified.summary}":`, err);
 						}
 					}
 
-					await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+					if (savedEntries.length > 0) {
+						await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+					}
 				} catch (err) {
-					console.error("Background processing error:", err);
+					console.error("[Flow] Classification/embedding error:", err);
 				}
 			};
 
@@ -208,6 +240,7 @@ export default function IndexScreen() {
 	};
 
 	const handleRetrieval = async (text: string) => {
+		console.log('[Flow] Starting retrieval...');
 		setIsLoading(true);
 		try {
 			const {
@@ -216,8 +249,10 @@ export default function IndexScreen() {
 			if (!user) return;
 
 			const results = await searchEntries(text, user.id);
+			console.log('[Flow] Matched entries:', results.length, results);
 			const response = await getRetrievalAnswer(text, results);
 
+			console.log('[Flow] AI response ready, type:', response.type);
 			setAiResponse(response);
 			await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 		} catch (error) {

@@ -1,7 +1,7 @@
 // lib/classifier.ts
 // Uses Groq (llama-3.1-8b-instant) for classification — fast, free tier 14k req/day
 
-const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY;
+const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY!;
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.1-8b-instant';
 
@@ -32,33 +32,55 @@ export function detectIntent(input: string): Intent {
 
 // ─── Classifier ───────────────────────────────────────────────────────────────
 
-const CLASSIFIER_SYSTEM_PROMPT = `You are a smart life-logger classifier. Your job is to analyze short user inputs and extract structured data from them.
+const CLASSIFIER_SYSTEM_PROMPT = `You are a smart life-logger classifier. Analyze the user's input and extract structured data.
 
 Always respond with a valid JSON object and nothing else — no markdown, no explanation, no backticks.
 
-JSON shape:
+== CRITICAL: MULTI-ITEM DETECTION ==
+If the input contains MULTIPLE distinct items (especially multiple expenses like "spent 30 on dahi, 50 on puncture and 90 on dinner"), you MUST split them into separate entries.
+
+Return either:
+- A single object (for one item)
+- An array of objects (for multiple items)
+
+Each object has this shape:
 {
   "category": one of "expense" | "reading" | "idea" | "travel" | "shopping" | "health" | "misc",
-  "entity": string or null — a named thing (book title, place, person, brand, project),
+  "entity": string or null,
   "entity_type": one of "book" | "place" | "project" | "person" | "brand" or null,
-  "amount": number or null — only for expenses,
-  "currency": string or null — ISO code like "USD", "INR", "EUR" — only for expenses,
-  "summary": string — a clean, concise 1-sentence version of the input (max 12 words)
+  "amount": number or null — the amount for THIS specific item only,
+  "currency": string or null — ISO code like "USD", "INR", "EUR",
+  "summary": string — a clean 1-sentence description of THIS specific item only (e.g. "Spent ₹50 on bike puncture repair")
 }
 
-Rules:
-- If the input mentions paying, spent, bought, cost → category is "expense"
-- If it mentions a book, article, read, reading → category is "reading"
-- If it's a thought, shower thought, idea, realization → category is "idea"
-- If it mentions a trip, flight, hotel, visited, travel → category is "travel"
-- If it mentions buying something (not expense amount) → category is "shopping"
-- If it mentions workout, gym, calories, sleep, medicine, health → category is "health"
-- Default to "misc" if unsure
-- Always store the amount in Indian Rupees
-- Extract entity only if clearly named (e.g. "Atomic Habits", "Bangalore", "Nike")
-- Keep summary short and clean, third-person neutral ("Paid ₹450 for lunch", "Read chapter 3 of Atomic Habits")`;
+== SPLITTING RULES ==
+- "spent 30 on dahi, 50 on bike puncture and 90 on dinner" → 3 separate entries, amounts 30, 50, 90
+- "bought milk and eggs" → 2 entries (no amounts, that's fine)
+- "read Atomic Habits and loved it" → 1 entry (it's one thought about one book)
+- "spent 500 on groceries" → 1 entry
+- Comma/and-separated lists of different things with individual amounts = always split
 
-export async function classifyEntry(input: string): Promise<ClassificationResult> {
+== CATEGORY RULES ==
+- paying/spent/bought with amount → "expense"
+- book/article/read/reading → "reading"
+- thought/idea/realization → "idea"
+- trip/flight/hotel/visited → "travel"
+- buying something (no amount) → "shopping"
+- workout/gym/calories/sleep/medicine → "health"
+- default → "misc"
+
+== SUMMARY RULES ==
+- Short, clean, third-person neutral
+- Include the specific item and amount: "Spent ₹50 on bike puncture", "Paid ₹90 for dinner"
+- Max 12 words
+
+== AMOUNT & CURRENCY RULES ==
+- Always store amount as a plain number (e.g. 50, not "₹50")
+- Default currency is "INR" unless the user explicitly mentions a different currency (USD, EUR, etc.)
+- Always set currency to "INR" if no currency is mentioned
+- In the summary string, always format amounts with the ₹ symbol (e.g. "Spent ₹50 on dahi")`;
+
+export async function classifyEntry(input: string): Promise<ClassificationResult[]> {
   const response = await fetch(GROQ_BASE_URL, {
     method: 'POST',
     headers: {
@@ -67,9 +89,9 @@ export async function classifyEntry(input: string): Promise<ClassificationResult
     },
     body: JSON.stringify({
       model: GROQ_MODEL,
-      temperature: 0.1, // low temp for consistent structured output
-      max_tokens: 256,
-      response_format: { type: 'json_object' },
+      temperature: 0.1,
+      max_tokens: 512,
+      // No response_format constraint — Llama returns root arrays which json_object mode blocks
       messages: [
         { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
         { role: 'user', content: input },
@@ -83,28 +105,47 @@ export async function classifyEntry(input: string): Promise<ClassificationResult
   }
 
   const data = await response.json();
-  const raw = data.choices?.[0]?.message?.content ?? '{}';
+  const raw = (data.choices?.[0]?.message?.content ?? '[]')
+    .replace(/```json\n?/g, '')
+    .replace(/```\n?/g, '')
+    .trim();
 
   try {
-    const parsed = JSON.parse(raw) as ClassificationResult;
-    // Sanitize — ensure required fields have fallbacks
-    return {
-      category: parsed.category ?? 'misc',
-      entity: parsed.entity ?? null,
-      entity_type: parsed.entity_type ?? null,
-      amount: typeof parsed.amount === 'number' ? parsed.amount : null,
-      currency: parsed.currency ?? null,
-      summary: parsed.summary ?? input.slice(0, 80),
-    };
+    const parsed = JSON.parse(raw);
+
+    // Normalize: root array (Llama does this), { items: [] }, { entries: [] }, or single flat object
+    let results: ClassificationResult[] = [];
+
+    if (Array.isArray(parsed)) {
+      results = parsed;
+    } else if (Array.isArray(parsed.items)) {
+      results = parsed.items;
+    } else if (Array.isArray(parsed.entries)) {
+      results = parsed.entries;
+    } else {
+      // Single item returned as flat object
+      results = [parsed];
+    }
+
+    // Sanitize each result
+    return results.map(r => ({
+      category: r.category ?? 'misc',
+      entity: r.entity ?? null,
+      entity_type: r.entity_type ?? null,
+      amount: typeof r.amount === 'number' ? r.amount : null,
+      currency: r.currency ?? null,
+      summary: r.summary ?? input.slice(0, 80),
+    }));
+
   } catch {
-    // If JSON parse fails, return safe fallback
-    return {
+    // Fallback: return single unsplit entry
+    return [{
       category: 'misc',
       entity: null,
       entity_type: null,
       amount: null,
       currency: null,
       summary: input.slice(0, 80),
-    };
+    }];
   }
 }

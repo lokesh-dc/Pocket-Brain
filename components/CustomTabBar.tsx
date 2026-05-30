@@ -152,7 +152,7 @@ export default function CustomTabBar({ state, descriptors, navigation }: any) {
 			{/* Entity Chip Detection */}
 			{isInputActive && showEntityChip && (
 				<View style={styles.chipContainer}>
-					<EntityChip label="Food" onPress={() => {}} />
+					<EntityChip label="Food" onPress={() => { }} />
 				</View>
 			)}
 
@@ -173,7 +173,7 @@ export default function CustomTabBar({ state, descriptors, navigation }: any) {
 									{
 										width: TAB_WIDTH,
 										height: "100%",
-										backgroundColor: "white",
+										backgroundColor: "black",
 										borderRadius: 20,
 									},
 									indicatorStyle,
@@ -198,9 +198,9 @@ export default function CustomTabBar({ state, descriptors, navigation }: any) {
 								style={[styles.tabItem, { flex: 1 }]}>
 								<Icon
 									size={20}
-									color={isFocused ? "#1a1a1a" : "white"}
+									color={isFocused ? "white" : "black"}
 									strokeWidth={isFocused ? 2.5 : 2}
-									opacity={isFocused ? 1 : 0.4}
+									opacity={1}
 								/>
 							</TouchableOpacity>
 						);
@@ -227,7 +227,7 @@ export default function CustomTabBar({ state, descriptors, navigation }: any) {
 						onChangeText={setInputText}
 						multiline
 						numberOfLines={1}
-						maxHeight={100}
+						// maxHeight={100}
 					/>
 				</Animated.View>
 
@@ -267,7 +267,7 @@ const styles = StyleSheet.create({
 		width: "100%",
 	},
 	pill: {
-		backgroundColor: "#1a1a1a",
+		backgroundColor: "white",
 		height: 52,
 		borderRadius: 26,
 		flexDirection: "row",
@@ -276,6 +276,8 @@ const styles = StyleSheet.create({
 		marginRight: 12,
 		flex: 1,
 		justifyContent: "space-between",
+		borderBlockColor: "rgba(0,0,0,0.2)",
+		borderWidth: 1
 	},
 	tabItem: {
 		height: 40,
@@ -289,8 +291,8 @@ const styles = StyleSheet.create({
 		width: 52,
 		height: 52,
 		borderRadius: 26,
-		backgroundColor: "#7F77DD",
-		shadowColor: "#7F77DD",
+		backgroundColor: "black",
+		shadowColor: "black",
 		shadowOffset: { width: 0, height: 4 },
 		shadowOpacity: 0.4,
 		shadowRadius: 16,
