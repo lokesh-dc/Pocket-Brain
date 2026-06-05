@@ -1,12 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
+import { backfillEntries } from '../lib/backfillEntries';
 import { Entry } from '../types';
 
 export function useEntries() {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [backfillRunning, setBackfillRunning] = useState(false);
 
-  const fetchEntries = async () => {
+  const fetchEntries = useCallback(async () => {
     try {
       setLoading(true);
       const { data: { user } } = await supabase.auth.getUser();
@@ -32,7 +34,21 @@ export function useEntries() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const runBackfill = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user || backfillRunning) return;
+
+    setBackfillRunning(true);
+    const result = await backfillEntries(user.id);
+    setBackfillRunning(false);
+
+    if (result.updated > 0) {
+      console.log(`[backfill] migrated ${result.updated}/${result.total} entries`);
+      await fetchEntries();
+    }
+  }, [backfillRunning, fetchEntries]);
 
   const addEntry = (entry: Entry) => {
     setEntries(prev => [entry, ...prev]);
@@ -48,14 +64,16 @@ export function useEntries() {
 
   useEffect(() => {
     fetchEntries();
-  }, []);
+  }, [fetchEntries]);
 
   return { 
     entries, 
-    loading, 
+    loading,
+    backfillRunning,
     refresh: fetchEntries,
     addEntry,
     updateEntry,
-    removeEntry
+    removeEntry,
+    runBackfill
   };
 }

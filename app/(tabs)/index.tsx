@@ -17,11 +17,11 @@ import EntryCard from "../../components/EntryCard";
 import EntryPopup from "../../components/EntryPopup";
 import RetrievalResult from "../../components/RetrievalResult";
 import { useEntries } from "../../hooks/useEntries";
-import { getRetrievalAnswer } from "../../lib/ai";
-import { classifyEntry, detectIntent } from "../../lib/classifier";
-import { generateEmbedding, searchEntries } from "../../lib/embeddings";
+import { parseQuery } from "../../lib/queryParser";
+import { classifyAndSave } from "../../lib/classifier";
+import { generateRetrievalAnswer } from "../../lib/ai";
 import { supabase } from "../../lib/supabase";
-import { Entry } from "../../types";
+import { Entry, ParsedQuery } from "../../types";
 
 export default function IndexScreen() {
 	const [isLoading, setIsLoading] = React.useState(false);
@@ -67,13 +67,24 @@ export default function IndexScreen() {
 		addEntry,
 		updateEntry,
 		removeEntry,
+		runBackfill,
 	} = useEntries();
 
+	React.useEffect(() => {
+		if (!entriesLoading && entries.length > 0) {
+			const needsBackfill = entries.some(e => !e.embedding_doc);
+			if (needsBackfill) {
+				runBackfill();
+			}
+		}
+	}, [entriesLoading]);
+
 	const handleInputSubmit = async (text: string, category?: string) => {
-		const intent = detectIntent(text);
-		console.log(`[Flow] Intent: ${intent} | Input: "${text}"`);
-		if (intent === "retrieve") {
-			await handleRetrieval(text);
+		setIsLoading(true);
+		const parsed = await parseQuery(text);
+		console.log(`[Flow] Intent: ${parsed.intent} | Input: "${text}"`);
+		if (parsed.intent === "retrieve") {
+			await handleRetrieval(text, parsed);
 		} else {
 			await handleCapture(text, category);
 		}
@@ -109,129 +120,10 @@ export default function IndexScreen() {
 				return;
 			}
 
-			const processEntry = async () => {
-				try {
-					console.log('[Flow] Classifying...');
-					const classifiedResults = await classifyEntry(text);
-					console.log('[Flow] Classified:', JSON.stringify(classifiedResults));
-
-					const savedEntries: string[] = [];
-
-					for (const classified of classifiedResults) {
-						try {
-							const embedding = await generateEmbedding(classified.summary);
-
-							const categoryName = manualCategory || classified.category;
-
-							let categoryData = null;
-							const { data: catData } = await supabase
-								.from("categories")
-								.select("*")
-								.eq("user_id", user.id)
-								.ilike("name", categoryName)
-								.single();
-
-							if (catData) {
-								categoryData = catData;
-							} else {
-								const { data: newCat } = await supabase
-									.from("categories")
-									.insert({ user_id: user.id, name: categoryName })
-									.select()
-									.single();
-								if (newCat) categoryData = newCat;
-							}
-
-							const { data: entry, error: entryError } = await supabase
-								.from("entries")
-								.insert({
-									user_id: user.id,
-									raw_text: text,
-									category_id: categoryData?.id,
-									summary: classified.summary,
-									amount: classified.amount,
-									currency: classified.currency,
-									embedding: embedding,
-								})
-								.select()
-								.single();
-
-							if (entryError) throw entryError;
-
-							// Only update temp entry for the first saved item
-							if (savedEntries.length === 0) {
-								updateEntry(tempId, {
-									id: entry.id,
-									user_id: user.id,
-									summary: classified.summary,
-									category: categoryData || undefined,
-									amount: classified.amount,
-									currency: classified.currency,
-								});
-							} else {
-								// Subsequent entries: add new entry to local state
-								addEntry({
-									id: entry.id,
-									user_id: user.id,
-									raw_text: text,
-									summary: classified.summary,
-									timestamp: new Date().toISOString(),
-									category: categoryData || undefined,
-									amount: classified.amount,
-									currency: classified.currency,
-								});
-							}
-
-							if (classified.entity) {
-								console.log('[Flow] Linking entity:', classified.entity);
-								const { data: existingEntity } = await supabase
-									.from("entities")
-									.select("id")
-									.eq("user_id", user.id)
-									.eq("name", classified.entity)
-									.eq("type", classified.entity_type || "project")
-									.single();
-
-								let entityId;
-								if (existingEntity) {
-									entityId = existingEntity.id;
-								} else {
-									const { data: newEntity } = await supabase
-										.from("entities")
-										.insert({
-											user_id: user.id,
-											name: classified.entity,
-											type: classified.entity_type || "project",
-										})
-										.select()
-										.single();
-									if (newEntity) entityId = newEntity.id;
-								}
-
-								if (entityId && entry) {
-									await supabase.from("entry_entities").insert({
-										entry_id: entry.id,
-										entity_id: entityId,
-									});
-								}
-							}
-
-							savedEntries.push(entry.id);
-							console.log(`[Flow] Entry saved (${savedEntries.length}/${classifiedResults.length}):`, entry.id, classified.summary);
-						} catch (err) {
-							console.error(`[Flow] Failed to save "${classified.summary}":`, err);
-						}
-					}
-
-					if (savedEntries.length > 0) {
-						await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-					}
-				} catch (err) {
-					console.error("[Flow] Classification/embedding error:", err);
-				}
-			};
-
-			processEntry();
+			await classifyAndSave(text, user.id);
+			removeEntry(tempId);
+			refresh();
+			await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 		} catch (error: any) {
 			console.error("Error starting entry capture:", error);
 			Alert.alert("Error", error.message || "Failed to start capture");
@@ -239,18 +131,16 @@ export default function IndexScreen() {
 		}
 	};
 
-	const handleRetrieval = async (text: string) => {
+	const handleRetrieval = async (text: string, parsed?: ParsedQuery) => {
 		console.log('[Flow] Starting retrieval...');
-		setIsLoading(true);
 		try {
 			const {
 				data: { user },
 			} = await supabase.auth.getUser();
 			if (!user) return;
 
-			const results = await searchEntries(text, user.id);
-			console.log('[Flow] Matched entries:', results.length, results);
-			const response = await getRetrievalAnswer(text, results);
+			const query = parsed ?? await parseQuery(text);
+			const response = await generateRetrievalAnswer(query, user.id);
 
 			console.log('[Flow] AI response ready, type:', response.type);
 			setAiResponse(response);

@@ -1,131 +1,120 @@
-// lib/ai.ts
-// Uses Groq (llama-3.1-8b-instant) for retrieval — answers user queries from matched entries
+import { ParsedQuery, RetrievalAnswer } from '../types';
+import { hybridSearch } from './hybridSearch';
+import { Entry } from '../types';
 
-const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY!;
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.1-8b-instant';
+const GROQ_MODEL    = 'llama-3.1-8b-instant';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export interface RetrievalEntry {
-  id: string;
-  raw_text: string;
-  summary: string;
-  category: string;
-  amount: number | null;
-  currency: string | null;
-  timestamp: string;
+function extractJSON(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) return fenced[1].trim();
+  const firstBrace = raw.indexOf('{');
+  const lastBrace  = raw.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1) return raw.slice(firstBrace, lastBrace + 1);
+  return raw.trim();
 }
 
-export interface RetrievalResult {
-  answer: string;
-  entry_ids: string[];
-  type: 'summary' | 'list' | 'calculation' | 'empty';
+function computeAggregations(entries: Entry[], parsed: ParsedQuery) {
+  if (parsed.aggregation === 'sum') {
+    const total = entries.reduce((acc, e) => acc + (e.amount ?? 0), 0);
+    const currency = entries.find(e => e.currency)?.currency ?? 'INR';
+    return { total, currency, count: entries.length };
+  }
+  if (parsed.aggregation === 'count') {
+    return { count: entries.length };
+  }
+  return null;
 }
 
-// ─── Retrieval ────────────────────────────────────────────────────────────────
-
-const RETRIEVAL_SYSTEM_PROMPT = `You are a personal memory assistant inside an app called Mindrop. The user logs thoughts, expenses, books, ideas, and more.
-
-Always respond with a valid JSON object and nothing else — no markdown, no explanation, no backticks.
-
-JSON shape:
-{
-  "answer": string — a conversational, friendly response (like a smart friend, not a robot),
-  "entry_ids": string[] — IDs of entries you actually used in your calculation or answer,
-  "type": one of "summary" | "list" | "calculation" | "empty"
+function summariseEntries(entries: Entry[]): string {
+  return entries.slice(0, 8).map(e =>
+    `- ${e.summary ?? e.raw_text} | ${e.category ? (typeof e.category === 'string' ? e.category : e.category.name) : ''} | ${e.amount ? `${e.currency ?? ''} ${e.amount}` : ''} | ${new Date(e.timestamp).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`
+  ).join('\n');
 }
 
-== CRITICAL FILTERING RULE ==
-The entries you receive are candidates from a vector search — they are NOT all guaranteed to be relevant.
-You MUST filter them yourself before calculating or listing.
+export async function generateRetrievalAnswer(
+  parsed: ParsedQuery,
+  userId: string
+): Promise<RetrievalAnswer> {
+  const entries = await hybridSearch(parsed, userId);
 
-For example:
-- Query "how much did I spend on bike" → only include entries where the description is clearly about a bike (repair, petrol for bike, puncture, etc.). Do NOT include dahi, dinner, stationary, or other unrelated expenses.
-- Query "what books did I read" → only include reading entries, not ideas or travel.
-- Query "how much on food" → only include food-related expenses like dinner, lunch, groceries. Not petrol, not stationary.
-
-When in doubt about whether an entry is relevant to the query topic, EXCLUDE it.
-Only sum or list entries that are clearly topically relevant to what the user asked.
-
-== OTHER RULES ==
-- "calculation" → summing money or counts. Show the total AND a brief breakdown of what you included.
-- "list" → listing specific entries. Use a short bullet format.
-- "summary" → broad overview of a time period or category.
-- "empty" → nothing relevant found after filtering.
-- Be concise. Max 3 sentences + breakdown for calculations.
-- Always mention what you included and what you excluded if relevant (e.g. "I counted bike repair and puncture but not your dinner or dahi expenses").
-- Reference amounts with their currency symbol.
-- Never make up entries. Only use what's given.`;
-
-export async function getRetrievalAnswer(
-  query: string,
-  matchedEntries: RetrievalEntry[]
-): Promise<RetrievalResult> {
-  if (matchedEntries.length === 0) {
+  if (entries.length === 0) {
     return {
-      answer: "I couldn't find anything matching that. Try logging some entries first!",
+      answer: "I couldn't find anything matching that. Try rephrasing or check if you've logged it.",
       entry_ids: [],
-      type: 'empty',
+      type: 'narrative',
     };
   }
 
-  // Format entries for the prompt — include raw_text so LLM has full context for filtering
-  const entriesContext = matchedEntries
-    .map(e => {
-      const date = new Date(e.timestamp).toLocaleDateString('en-IN', {
-        day: 'numeric', month: 'short',
-      });
-      const amountStr = e.amount != null ? ` | amount: ${e.currency ?? '₹'}${e.amount}` : '';
-      // Include raw_text alongside summary — gives LLM more signal for filtering
-      const text = e.summary && e.summary !== e.raw_text
-        ? `${e.summary} (original: "${e.raw_text}")`
-        : e.raw_text;
-      return `[id:${e.id}] (${date}) [${e.category}${amountStr}] ${text}`;
-    })
-    .join('\n');
+  const precomputed = computeAggregations(entries, parsed);
+  const timeContext = parsed.time_filter.range ?? 'recently';
+  const entrySummary = summariseEntries(entries);
 
-  const userMessage = `User query: "${query}"\n\nCandidate entries (filter these yourself before answering):\n${entriesContext}`;
-
-  const response = await fetch(GROQ_BASE_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${GROQ_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      temperature: 0.1, // low temp — this is a precision task, not creative
-      max_tokens: 512,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: RETRIEVAL_SYSTEM_PROMPT },
-        { role: 'user', content: userMessage },
-      ],
-    }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Groq retrieval error ${response.status}: ${err}`);
+  let aggregationInstruction = '';
+  if (parsed.aggregation === 'sum' && precomputed && 'total' in precomputed) {
+    aggregationInstruction = `The total amount is ${precomputed.total} ${precomputed.currency} across ${precomputed.count} entries. Lead with this total.`;
+  } else if (parsed.aggregation === 'count' && precomputed) {
+    aggregationInstruction = `There are exactly ${precomputed.count} entries. Lead with this number.`;
+  } else if (parsed.aggregation === 'list') {
+    aggregationInstruction = 'List the entries conversationally. Be concise.';
+  } else {
+    aggregationInstruction = 'Give a natural conversational answer based on the entries.';
   }
 
-  const data = await response.json();
-  const raw = data.choices?.[0]?.message?.content ?? '{}';
+  const prompt = `You answer questions about someone's personal life logs. Be a smart, brief friend — not a chatbot.
+
+Question: "${parsed.rewritten_query}"
+Time context: ${timeContext}
+${aggregationInstruction}
+
+Entries found:
+${entrySummary}
+
+Rules:
+- Keep answer under 3 sentences
+- Mention specific names, amounts, or dates from the entries
+- If time context is given, mention it
+- Do not say "Based on your entries" or "I found" — just answer
+- Return only valid JSON, no markdown
+
+Schema: {"answer":"string","entry_ids":["uuid array"],"type":"sum|count|list|narrative"}
+
+Output:`;
 
   try {
-    const parsed = JSON.parse(raw) as RetrievalResult;
-    console.log({ parsed })
+    const response = await fetch(GROQ_BASE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.EXPO_PUBLIC_GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+        max_tokens: 300,
+      }),
+    });
+
+    const data = await response.json();
+    const raw  = data.choices[0].message.content.trim();
+    const json = extractJSON(raw);
+    const result = JSON.parse(json) as RetrievalAnswer;
+
+    const validIds = new Set(entries.map(e => e.id));
+    result.entry_ids = result.entry_ids.filter(id => validIds.has(id));
+
+    return result;
+  } catch (err) {
+    console.error('[ai] retrieval answer failed:', err);
+    const fallbackAnswer = precomputed && 'total' in precomputed
+      ? `You spent ${precomputed.currency} ${precomputed.total} across ${precomputed.count} entries ${timeContext}.`
+      : `Found ${entries.length} entries ${timeContext}.`;
+
     return {
-      answer: parsed.answer ?? 'Something went wrong parsing the response.',
-      entry_ids: Array.isArray(parsed.entry_ids) ? parsed.entry_ids : [],
-      type: parsed.type ?? 'summary',
-    };
-  } catch {
-    return {
-      answer: 'Had trouble reading the response. Please try again.',
-      entry_ids: [],
-      type: 'empty',
+      answer: fallbackAnswer,
+      entry_ids: entries.map(e => e.id),
+      type: parsed.aggregation ?? 'narrative',
     };
   }
 }

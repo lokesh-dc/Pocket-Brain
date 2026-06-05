@@ -1,151 +1,151 @@
-// lib/classifier.ts
-// Uses Groq (llama-3.1-8b-instant) for classification — fast, free tier 14k req/day
+import { supabase } from './supabase';
+import { generateEmbedding } from './embeddings';
+import { ClassifierResult, EntityInput } from '../types';
 
-const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY!;
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.1-8b-instant';
+const GROQ_MODEL    = 'llama-3.1-8b-instant';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export type Intent = 'log' | 'retrieve';
-
-export interface ClassificationResult {
-  category: 'expense' | 'reading' | 'idea' | 'travel' | 'shopping' | 'health' | 'misc';
-  entity: string | null;
-  entity_type: 'book' | 'place' | 'project' | 'person' | 'brand' | null;
-  amount: number | null;
-  currency: string | null;
-  summary: string;
+function extractJSON(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) return fenced[1].trim();
+  const firstBrace = raw.indexOf('{');
+  const lastBrace  = raw.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1) return raw.slice(firstBrace, lastBrace + 1);
+  return raw.trim();
 }
 
-// ─── Intent Detection (rule-based, no API call) ───────────────────────────────
+async function callClassifier(text: string): Promise<ClassifierResult> {
+  const today = new Date().toISOString().split('T')[0];
 
-const RETRIEVE_KEYWORDS = [
-  'what', 'how much', 'show me', 'give me', 'when did',
-  'how many', 'find', 'list', 'summarize', 'tell me', 'which', 'where did',
-];
+  const prompt = `Classify this life log entry. Return only valid JSON. No explanation.
 
-export function detectIntent(input: string): Intent {
-  const lower = input.toLowerCase().trim();
-  return RETRIEVE_KEYWORDS.some(kw => lower.includes(kw)) ? 'retrieve' : 'log';
-}
+Schema: {"category":"expense|reading|idea|travel|shopping|health|misc","entities":[{"name":"string","type":"book|place|person|brand|project"}],"amount":number|null,"currency":"INR|USD|EUR|null","summary":"one sentence past tense","tags":["2 to 4 lowercase tags"],"embedding_doc":"string"}
 
-// ─── Classifier ───────────────────────────────────────────────────────────────
+embedding_doc format: "[category] amount currency | entity name | ${today}\\nSummary: summary text\\nTags: tag1, tag2, tag3"
+If no amount, omit it. If no entity, write "general". Keep embedding_doc under 120 characters.
 
-const CLASSIFIER_SYSTEM_PROMPT = `You are a smart life-logger classifier. Analyze the user's input and extract structured data.
+Examples:
 
-Always respond with a valid JSON object and nothing else — no markdown, no explanation, no backticks.
+Input: "spent 80 on coffee at Blue Tokai"
+Output: {"category":"expense","entities":[{"name":"Blue Tokai","type":"place"}],"amount":80,"currency":"INR","summary":"Spent ₹80 on coffee at Blue Tokai.","tags":["coffee","food","cafe","morning"],"embedding_doc":"[expense] 80 INR | Blue Tokai | ${today}\\nSummary: Coffee at Blue Tokai\\nTags: coffee, food, cafe"}
 
-== CRITICAL: MULTI-ITEM DETECTION ==
-If the input contains MULTIPLE distinct items (especially multiple expenses like "spent 30 on dahi, 50 on puncture and 90 on dinner"), you MUST split them into separate entries.
+Input: "finished reading chapter 5 of Atomic Habits, great stuff about habit stacking"
+Output: {"category":"reading","entities":[{"name":"Atomic Habits","type":"book"}],"amount":null,"currency":null,"summary":"Finished chapter 5 of Atomic Habits about habit stacking.","tags":["books","habits","productivity","reading"],"embedding_doc":"[reading] | Atomic Habits | ${today}\\nSummary: Chapter 5 habit stacking\\nTags: books, habits, productivity"}
 
-Return either:
-- A single object (for one item)
-- An array of objects (for multiple items)
+Input: "had lunch with Priya at Rustom's, spent 650"
+Output: {"category":"expense","entities":[{"name":"Priya","type":"person"},{"name":"Rustom's","type":"place"}],"amount":650,"currency":"INR","summary":"Had lunch with Priya at Rustom's for ₹650.","tags":["food","lunch","friends","eating out"],"embedding_doc":"[expense] 650 INR | Rustom's | ${today}\\nSummary: Lunch with Priya\\nTags: food, lunch, friends"}
 
-Each object has this shape:
-{
-  "category": one of "expense" | "reading" | "idea" | "travel" | "shopping" | "health" | "misc",
-  "entity": string or null,
-  "entity_type": one of "book" | "place" | "project" | "person" | "brand" or null,
-  "amount": number or null — the amount for THIS specific item only,
-  "currency": string or null — ISO code like "USD", "INR", "EUR",
-  "summary": string — a clean 1-sentence description of THIS specific item only (e.g. "Spent ₹50 on bike puncture repair")
-}
+Input: "${text.replace(/"/g, "'")}"
+Output:`;
 
-== SPLITTING RULES ==
-- "spent 30 on dahi, 50 on bike puncture and 90 on dinner" → 3 separate entries, amounts 30, 50, 90
-- "bought milk and eggs" → 2 entries (no amounts, that's fine)
-- "read Atomic Habits and loved it" → 1 entry (it's one thought about one book)
-- "spent 500 on groceries" → 1 entry
-- Comma/and-separated lists of different things with individual amounts = always split
-
-== CATEGORY RULES ==
-- paying/spent/bought with amount → "expense"
-- book/article/read/reading → "reading"
-- thought/idea/realization → "idea"
-- trip/flight/hotel/visited → "travel"
-- buying something (no amount) → "shopping"
-- workout/gym/calories/sleep/medicine → "health"
-- default → "misc"
-
-== SUMMARY RULES ==
-- Short, clean, third-person neutral
-- Include the specific item and amount: "Spent ₹50 on bike puncture", "Paid ₹90 for dinner"
-- Max 12 words
-
-== AMOUNT & CURRENCY RULES ==
-- Always store amount as a plain number (e.g. 50, not "₹50")
-- Default currency is "INR" unless the user explicitly mentions a different currency (USD, EUR, etc.)
-- Always set currency to "INR" if no currency is mentioned
-- In the summary string, always format amounts with the ₹ symbol (e.g. "Spent ₹50 on dahi")`;
-
-export async function classifyEntry(input: string): Promise<ClassificationResult[]> {
   const response = await fetch(GROQ_BASE_URL, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${GROQ_API_KEY}`,
       'Content-Type': 'application/json',
+      Authorization: `Bearer ${process.env.EXPO_PUBLIC_GROQ_API_KEY}`,
     },
     body: JSON.stringify({
       model: GROQ_MODEL,
+      messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
-      max_tokens: 512,
-      // No response_format constraint — Llama returns root arrays which json_object mode blocks
-      messages: [
-        { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
-        { role: 'user', content: input },
-      ],
+      max_tokens: 400,
     }),
   });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Groq classifier error ${response.status}: ${err}`);
-  }
-
   const data = await response.json();
-  const raw = (data.choices?.[0]?.message?.content ?? '[]')
-    .replace(/```json\n?/g, '')
-    .replace(/```\n?/g, '')
-    .trim();
+  const raw  = data.choices[0].message.content.trim();
+  const json = extractJSON(raw);
+  return JSON.parse(json) as ClassifierResult;
+}
+
+async function upsertEntity(
+  entity: EntityInput,
+  userId: string
+): Promise<string | null> {
+  const { data: existing } = await supabase
+    .from('entities')
+    .select('id')
+    .eq('user_id', userId)
+    .ilike('name', entity.name)
+    .eq('type', entity.type)
+    .maybeSingle();
+
+  if (existing) return existing.id;
+
+  const { data: created, error } = await supabase
+    .from('entities')
+    .insert({ user_id: userId, name: entity.name, type: entity.type })
+    .select('id')
+    .single();
+
+  if (error) {
+    console.error('[classifier] entity upsert failed:', error);
+    return null;
+  }
+  return created.id;
+}
+
+export async function classifyAndSave(
+  rawText: string,
+  userId: string
+): Promise<void> {
+  let result: ClassifierResult;
 
   try {
-    const parsed = JSON.parse(raw);
-
-    // Normalize: root array (Llama does this), { items: [] }, { entries: [] }, or single flat object
-    let results: ClassificationResult[] = [];
-
-    if (Array.isArray(parsed)) {
-      results = parsed;
-    } else if (Array.isArray(parsed.items)) {
-      results = parsed.items;
-    } else if (Array.isArray(parsed.entries)) {
-      results = parsed.entries;
-    } else {
-      // Single item returned as flat object
-      results = [parsed];
-    }
-
-    // Sanitize each result
-    return results.map(r => ({
-      category: r.category ?? 'misc',
-      entity: r.entity ?? null,
-      entity_type: r.entity_type ?? null,
-      amount: typeof r.amount === 'number' ? r.amount : null,
-      currency: r.currency ?? null,
-      summary: r.summary ?? input.slice(0, 80),
-    }));
-
-  } catch {
-    // Fallback: return single unsplit entry
-    return [{
+    result = await callClassifier(rawText);
+  } catch (err) {
+    console.error('[classifier] primary parse failed, using fallback:', err);
+    result = {
       category: 'misc',
-      entity: null,
-      entity_type: null,
+      entities: [],
       amount: null,
       currency: null,
-      summary: input.slice(0, 80),
-    }];
+      summary: rawText,
+      tags: [],
+      embedding_doc: `[misc] | general | ${new Date().toISOString().split('T')[0]}\nSummary: ${rawText}`,
+    };
+  }
+
+  const embedding = await generateEmbedding(result.embedding_doc);
+
+  const { data: entry, error: entryError } = await supabase
+    .from('entries')
+    .insert({
+      user_id:       userId,
+      raw_text:      rawText,
+      category:      result.category,
+      summary:       result.summary,
+      amount:        result.amount,
+      currency:      result.currency,
+      tags:          result.tags,
+      embedding_doc: result.embedding_doc,
+      embedding,
+    })
+    .select('id')
+    .single();
+
+  if (entryError || !entry) {
+    console.error('[classifier] entry insert failed:', entryError);
+    return;
+  }
+
+  if (result.entities.length > 0) {
+    const entityIds = await Promise.all(
+      result.entities.map(e => upsertEntity(e, userId))
+    );
+
+    const links = entityIds
+      .filter((id): id is string => id !== null)
+      .map(entityId => ({ entry_id: entry.id, entity_id: entityId }));
+
+    if (links.length > 0) {
+      const { error: linkError } = await supabase
+        .from('entry_entities')
+        .insert(links);
+
+      if (linkError) {
+        console.error('[classifier] entry_entities insert failed:', linkError);
+      }
+    }
   }
 }
