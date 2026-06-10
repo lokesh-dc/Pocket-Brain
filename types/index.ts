@@ -6,7 +6,7 @@ export type Category = {
   is_default: boolean;
 };
 
-export type EntityType = 'book' | 'place' | 'project' | 'brand' | 'person';
+export type EntityType = string; // Dynamic string to allow any AI-generated type
 
 export type Entity = {
   id: string;
@@ -38,17 +38,21 @@ export type EntryEntity = {
 
 export type EntityInput = {
   name: string;
-  type: 'book' | 'place' | 'person' | 'brand' | 'project';
+  type: EntityType;
 };
 
-export type ClassifierResult = {
-  category: 'expense' | 'reading' | 'idea' | 'travel' | 'shopping' | 'health' | 'misc';
+export type ClassifierItem = {
+  category: 'expense' | 'reading' | 'idea' | 'travel' | 'shopping' | 'health' | 'media' | 'misc';
   entities: EntityInput[];
   amount: number | null;
   currency: string | null;
   summary: string;
   tags: string[];
   embedding_doc: string;
+};
+
+export type ClassifierResult = {
+  items: ClassifierItem[];
 };
 
 export type TimeFilter = {
@@ -61,7 +65,7 @@ export type TimeFilter = {
 export type ParsedQuery = {
   intent: 'retrieve' | 'log';
   rewritten_query: string;
-  category_filter: 'expense' | 'reading' | 'idea' | 'travel' | 'shopping' | 'health' | 'misc' | null;
+  category_filter: 'expense' | 'reading' | 'idea' | 'travel' | 'shopping' | 'health' | 'media' | 'misc' | null;
   time_filter: TimeFilter;
   entity_filter: string | null;
   aggregation: 'sum' | 'count' | 'list' | null;
@@ -72,3 +76,30 @@ export type RetrievalAnswer = {
   entry_ids: string[];
   type: 'sum' | 'count' | 'list' | 'narrative';
 };
+
+export type DigestPeriod = 'today' | 'week' | 'month';
+
+export type DigestRawData = {
+  entryCountByCategory: Record<string, number>;
+  totalAmountByCategory: Record<string, number>;
+  biggestExpense?: {
+    amount: number;
+    currency: string;
+    summary: string;
+    timestamp: string;
+  };
+  topEntity?: {
+    name: string;
+    count: number;
+  };
+};
+
+export type Digest = {
+  id: string;
+  user_id: string;
+  period: DigestPeriod;
+  generated_at: string;
+  narrative: string;
+  raw_data: DigestRawData;
+};
+

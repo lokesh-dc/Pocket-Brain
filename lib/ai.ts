@@ -52,7 +52,7 @@ export async function generateRetrievalAnswer(
 
   let aggregationInstruction = '';
   if (parsed.aggregation === 'sum' && precomputed && 'total' in precomputed) {
-    aggregationInstruction = `The total amount is ${precomputed.total} ${precomputed.currency} across ${precomputed.count} entries. Lead with this total.`;
+    aggregationInstruction = `The total amount is ${precomputed.total} ${precomputed.currency} across ${precomputed.count} entries. Lead with this total, then briefly mention the breakdown or key items that make it up.`;
   } else if (parsed.aggregation === 'count' && precomputed) {
     aggregationInstruction = `There are exactly ${precomputed.count} entries. Lead with this number.`;
   } else if (parsed.aggregation === 'list') {
